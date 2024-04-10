@@ -23,7 +23,7 @@ class RACCAR(Dataset):
         img = self.imgs[idx]
         img = img.reshape(img.shape[0],1,img.shape[1],img.shape[2])
         u = self.us[idx] if idx == 0 else self.us[idx-1]
-        return torch.Tensor(img), torch.Tensor(u) # dummy datat to prevent breaking 
+        return torch.Tensor(img)/255, torch.Tensor(u) # dummy datat to prevent breaking 
 
 class RACCARDataset(LightningDataModule):
     """

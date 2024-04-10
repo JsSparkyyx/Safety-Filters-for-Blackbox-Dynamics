@@ -15,7 +15,7 @@ def main(args):
     
 
     data = RACCARDataset(**args, pin_memory=True)
-    model = InDCBFController(1,2,args['latent_dim'],args['device'])
+    model = InDCBFController(1,2,None,args['device'],latent_dim=args['latent_dim'])
     trainer = InDCBFTrainer(model,args)
     runner = Trainer(logger=tb_logger,
                  callbacks=[
@@ -43,7 +43,7 @@ if __name__ == '__main__':
     parser.add_argument('--val_batch_size', default=1)
     parser.add_argument('--num_workers', default=4)
     parser.add_argument('--max_epochs',  '-epoch', default=100)
-    parser.add_argument('--latent_dim', default=128)
+    parser.add_argument('--latent_dim', default=64)
     parser.add_argument('--data_path',  '-tp', default="./trajectories/1")
     parser.add_argument('--save_path',  '-sp', default="./logs/")
     parser.add_argument('--name', default="DynamicLearning")

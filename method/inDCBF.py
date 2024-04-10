@@ -108,7 +108,7 @@ class InDCBFController(torch.nn.Module):
                 gu = torch.bmm(g.view(g.shape[0],-1,self.n_control),u[:,k+1].unsqueeze(-1))
                 return self.ode_f(state) + gu.squeeze(-1)
             timesteps = torch.Tensor([k*0.05,(k+1)*0.05]).to(self.device)
-            x_tide = odeint(odefunc,x,timesteps)[1,:,:]
+            x_tide = odeint(odefunc,x,timesteps,rtol=1e-6)[1,:,:]
             x = self.vae(i[:,k,:],x,u[:,k])
             xs.append(x)
             x_tides.append(x_tide)
