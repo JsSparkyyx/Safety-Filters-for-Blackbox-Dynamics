@@ -119,7 +119,7 @@ class NeuralODE(nn.Module):
         return layer_output_dict
 
 class InDCBFController(torch.nn.Module):
-    def __init__(self,C,n_control,model_ref,device,params=None,latent_dim=256,h_dim=256,gamma=0.5,sample_size=200):
+    def __init__(self,C,n_control,model_ref,device,params=None,latent_dim=256,h_dim=256,gamma=0.5,sample_size=200,test_size=20,threshold=0.5):
         super(InDCBFController, self).__init__()
         self.model_ref = model_ref
         self.latent_dim = latent_dim
@@ -129,6 +129,7 @@ class InDCBFController(torch.nn.Module):
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
         self.sample_size = sample_size
+        self.test_size = test_size
         self.params = params
         self.init_nac_estimator()
 
@@ -180,6 +181,7 @@ class InDCBFController(torch.nn.Module):
         layer_state_dict = self.ode.get_layer_output(x)
         for n, state in layer_state_dict.items():
             self.estimator[n] = Estimator(state.shape[1], params[n]['M'], params[n]['O'], self.device)
+        self.layer_num = len(layer_state_dict)
 
     def save_neural_states(self,data_loader):
         self.eval()
@@ -193,9 +195,8 @@ class InDCBFController(torch.nn.Module):
                 xs.append(x)
             xs = torch.cat(xs,0)
             layer_output_dict = self.ode.get_layer_output(xs)
-            layer_state_dict = {}
             for idx, layer_name, output in enumerate(layer_output_dict.items()):
-                retain_graph = False if idx == len(layer_output_dict.keys()) - 1 else True
+                retain_graph = False if idx == self.layer_num - 1 else True
                 states = self.compute_states(output[0], output[1], self.params[layer_name]['sig_alpha'], retain_graph=retain_graph)
                 if len(states) > 0:
                     self.estimator_dict[layer_name].update(states)
@@ -209,9 +210,28 @@ class InDCBFController(torch.nn.Module):
         states = sigmoid(h*layer_grad, sig_alpha=sig_alpha)
         return states
 
-    def nac_filter(self,u):
-
-        return
+    def nac_filter(self,u,x,t):
+        def odefunc(t,state):
+            f, g = self.ode(state)
+            gu = torch.bmm(g.view(g.shape[0],-1,self.n_control),u.unsqueeze(-1))
+            return f + gu.squeeze(-1)
+        timesteps = torch.Tensor([t,t+0.05]).to(self.device)
+        x_tide = odeint(odefunc,x,timesteps,rtol=5e-6)[1,:,:]
+        for _ in range(self.test_size):
+            u_p = self.model_ref.generate(x_tide)
+            def odefunc(t,state):
+                f, g = self.ode(state)
+                gu = torch.bmm(g.view(g.shape[0],-1,self.n_control),u_p.unsqueeze(-1))
+                return f + gu.squeeze(-1)
+            timesteps = torch.Tensor([t+0.05,t+0.1]).to(self.device)
+            x_tide = odeint(odefunc,x_tide,timesteps,rtol=5e-6)[1,:,:]
+            layer_output_dict = self.ode.get_layer_output(x_tide)
+            scores = torch.zeros(x_tide.shape[0]).to(self.device)
+            for idx, layer_name, output in enumerate(layer_output_dict.items()):
+                retain_graph = False if idx == len(layer_output_dict.keys()) - 1 else True
+                states = self.compute_states(output[0], output[1], self.params[layer_name]['sig_alpha'], retain_graph=retain_graph)
+                scores += self.estimator_dict[layer_name].ood_test(states) / self.layer_num
+        return 
 
 def sigmoid(x, sig_alpha=1.0):
     """
