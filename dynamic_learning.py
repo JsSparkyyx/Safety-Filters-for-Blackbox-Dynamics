@@ -10,13 +10,10 @@ import argparse
 import os
 
 def main(args):
-    tb_logger =  TensorBoardLogger(save_dir=args['save_path'],
-                               name=args['name'],)
-    
-
+    tb_logger =  TensorBoardLogger(save_dir=args['save_path'],name=args['name'])
     data = RACCARDataset(**args, pin_memory=True)
     model = InDCBFController(1,2,None,args['device'],latent_dim=args['latent_dim'])
-    trainer = InDCBFTrainer(model,args)
+    trainer = InDCBFTrainer(model,**args)
     runner = Trainer(logger=tb_logger,
                  callbacks=[
                      ModelCheckpoint(save_top_k=2, 
@@ -38,9 +35,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--learning_rate',  '-lr', default=0.001)
     parser.add_argument('--weight_decay',  '-wd', default=0)
-    parser.add_argument('--w_latent',  '-wl', default=0.6)
-    parser.add_argument('--w_dyn',  '-wdy', default=1)
-    parser.add_argument('--w_recon',  '-wr', default=0.3)
+    parser.add_argument('--w_latent',  '-wl', default=5)
+    parser.add_argument('--w_dyn',  '-wdy', default=5)
+    parser.add_argument('--w_recon',  '-wr', default=0.5)
+    parser.add_argument('--dt',  '-dt', default=0.05)
+    parser.add_argument('--rtol',  '-rtol', default=5e-6)
+    parser.add_argument('--window_size',  '-ws', default=10)
     parser.add_argument('--seed',  '-s', default=42)
     parser.add_argument('--train_batch_size', default=32)
     parser.add_argument('--val_batch_size', default=16)

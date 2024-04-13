@@ -130,7 +130,7 @@ class InDCBFController(torch.nn.Module):
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
 
-    def simulate(self,i,u,dt=0.05):
+    def simulate(self,i,u,dt=0.05,window_size=5,rtol=5e-6):
         x_init = torch.zeros(i.shape[0],self.latent_dim).to(self.device)
         u = torch.cat([u[:,0,:].unsqueeze(1),u],dim=1)
         x = self.vae(i[:,0,:],x_init,u[:,0])
@@ -138,14 +138,14 @@ class InDCBFController(torch.nn.Module):
         xs = [x]
         x_tides = [x_tide]
         for k in trange(1,i.shape[1]):
-            if k % 5 == 1:
+            if k % window_size == 1:
                 x_tide = x
             def odefunc(t,state):
                 f, g = self.ode(state)
                 gu = torch.bmm(g.view(g.shape[0],-1,self.n_control),u[:,k+1].unsqueeze(-1))
                 return f + gu.squeeze(-1)
             timesteps = torch.Tensor([0,dt]).to(self.device)
-            x_tide = odeint(odefunc,x_tide,timesteps,rtol=5e-6)[1,:,:]
+            x_tide = odeint(odefunc,x_tide,timesteps,rtol=rtol)[1,:,:]
             x = self.vae(i[:,k,:],x,u[:,k])
             xs.append(x)
             x_tides.append(x_tide)
@@ -235,11 +235,21 @@ class InDCBFController(torch.nn.Module):
         return scores
 
 class InDCBFTrainer(pl.LightningModule):
-    def __init__(self,model,args):
+    def __init__(self,model,learning_rate=0.001,weight_decay=0,w_latent=5,w_dyn=5,w_recon=0.5,window_size=5,rtol=5e-6,dt=0.05,**kwargs):
         super(InDCBFTrainer,self).__init__()
         self.model = model
-        self.args = args
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.window_size = window_size
+        self.rtol = rtol
+        self.dt = dt
+        self.w_latent = w_latent
+        self.w_dyn = w_dyn
+        self.w_recon = w_recon
         self.curr_device = None
+        self.save_hyperparameters(ignore=['model'])
+        print('----hyper parameters----')
+        print(self.hparams)
     
     def forward(self,i,u,x=None):
         return self.model(i,u,x)
@@ -248,12 +258,12 @@ class InDCBFTrainer(pl.LightningModule):
         i, u = batch
         self.curr_device = i.device
 
-        x,x_tide,i_hat,i_tide = self.model.simulate(i,u)
+        x,x_tide,i_hat,i_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
         train_loss = self.model.loss_function(i,i_hat,i_tide,x,x_tide)
         print(train_loss)
-        train_loss['loss'] = train_loss['loss_latent']*self.args['w_latent'] \
-               + train_loss['loss_dyn']*self.args['w_dyn'] \
-               + train_loss['loss_recon']*self.args['w_recon']
+        train_loss['loss'] = train_loss['loss_latent']*self.w_latent \
+               + train_loss['loss_dyn']*self.w_dyn \
+               + train_loss['loss_recon']*self.w_recon
         self.log_dict({key: val.item() for key, val in train_loss.items()}, sync_dist=True)
         return train_loss['loss']
 
@@ -261,11 +271,11 @@ class InDCBFTrainer(pl.LightningModule):
         i, u = batch
         self.curr_device = i.device
 
-        x,x_tide,i_hat,i_tide = self.model.simulate(i,u)
+        x,x_tide,i_hat,i_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
         val_loss = self.model.loss_function(i,i_hat,i_tide,x,x_tide)
-        val_loss['loss'] = val_loss['loss_latent']*self.args['w_latent'] \
-               + val_loss['loss_dyn']*self.args['w_dyn'] \
-               + val_loss['loss_recon']*self.args['w_recon']
+        val_loss['loss'] = val_loss['loss_latent']*self.w_latent \
+               + val_loss['loss_dyn']*self.w_dyn \
+               + val_loss['loss_recon']*self.w_recon
         self.log_dict({f"val_{key}": val.item() for key, val in val_loss.items()}, sync_dist=True)
 
     def on_validation_end(self) -> None:
@@ -280,15 +290,18 @@ class InDCBFTrainer(pl.LightningModule):
         save_image(i_hat.data[0],
                           os.path.join(self.logger.log_dir , 
                                        "ReconDecode", 
-                                       f"recon_decode_Epoch_{self.current_epoch}.png"))
+                                       f"recon_decode_Epoch_{self.current_epoch}.png"),
+                              nrow=self.window_size)
         save_image(i_tide.data[0],
                           os.path.join(self.logger.log_dir , 
                                        "ReconDynamic", 
-                                       f"recon_dynamic_Epoch_{self.current_epoch}.png"))
+                                       f"recon_dynamic_Epoch_{self.current_epoch}.png"),
+                              nrow=self.window_size)
         save_image(i.data[0],
                           os.path.join(self.logger.log_dir , 
                                        "Samples", 
-                                       f"sample_Epoch_{self.current_epoch}.png"))
+                                       f"sample_Epoch_{self.current_epoch}.png"),
+                              nrow=self.window_size)
         np.savetxt(os.path.join(self.logger.log_dir , 
                                        "Latent", 
                                        f"latent_Epoch_{self.current_epoch}.txt"),
@@ -300,6 +313,6 @@ class InDCBFTrainer(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.model.parameters(),
-                               lr=self.args['learning_rate'],
-                               weight_decay=self.args['weight_decay'])
+                               lr=self.learning_rate,
+                               weight_decay=self.learning_rate)
         return optimizer
