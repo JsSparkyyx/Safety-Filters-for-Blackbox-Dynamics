@@ -7,7 +7,7 @@ from torch import nn
 from torchdiffeq import odeint
 from tqdm import trange, tqdm
 from torchvision.utils import save_image
-from utils import sigmoid, Estimator
+from .utils import sigmoid, Estimator
 
 def build_mlp(hidden_dims,dropout=0,activation=nn.ReLU,with_bn=True,no_act_last_layer=False):
     modules = nn.ModuleDict()
@@ -88,8 +88,8 @@ class NeuralODE(nn.Module):
         super(NeuralODE, self).__init__()
         self.ode_f = build_mlp(params_f)
         self.ode_g = build_mlp(params_g)
-        self.num_f = len(params_f-1)
-        self.num_g = len(params_g-1)
+        self.num_f = len(params_f)-1
+        self.num_g = len(params_g)-1
 
     def forward(self,x):
         f = x
@@ -120,7 +120,7 @@ class NeuralODE(nn.Module):
         return layer_output_dict
 
 class InDCBFController(torch.nn.Module):
-    def __init__(self,C,n_control,model_ref,device,params=None,latent_dim=256,h_dim=256,sample_size=200,test_size=20):
+    def __init__(self,C,n_control,model_ref,device,latent_dim=256,h_dim=256):
         super(InDCBFController, self).__init__()
         self.model_ref = model_ref
         self.latent_dim = latent_dim
@@ -129,10 +129,6 @@ class InDCBFController(torch.nn.Module):
         self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
-        self.sample_size = sample_size
-        self.test_size = test_size
-        self.params = params
-        self.init_nac_estimator()
 
     def simulate(self,i,u,dt=0.05):
         x_init = torch.zeros(i.shape[0],self.latent_dim).to(self.device)
@@ -159,13 +155,13 @@ class InDCBFController(torch.nn.Module):
         i_tide = self.vae.reconstruct(x_tides)
         return  (xs,x_tides,i_hat,i_tide)
 
-    def forward(self,i,u,x=None,dt=0.05,threshold=0.5):
+    def forward(self,i,u,x=None,dt=0.05,threshold=0.5,sample_size=200,test_size=20):
         if x is None:
             x = torch.zeros(i.shape[0],self.latent_dim)
         x = self.vae(x,i,u)
-        for _ in range(self.sample_size):
+        for _ in range(sample_size):
             u = self.model_ref.generate(x)
-            scores = self.nac_filter(u,dt=dt)
+            scores = self.nac_filter(u,x,dt,test_size)
             if scores >= threshold:
                 return u
         return self.model_ref.generate(x)
@@ -178,7 +174,8 @@ class InDCBFController(torch.nn.Module):
 
     def init_nac_estimator(self,params):
         self.estimator = {}
-        x = torch.rand(2,128).to(self.device)
+        self.params = params
+        x = torch.rand(2,self.latent_dim).to(self.device)
         layer_state_dict = self.ode.get_layer_output(x)
         for n, state in layer_state_dict.items():
             self.estimator[n] = Estimator(state.shape[1], params[n]['M'], params[n]['O'], self.device)
@@ -191,6 +188,7 @@ class InDCBFController(torch.nn.Module):
             x_init = torch.zeros(i.shape[0],self.latent_dim).to(self.device)
             u = torch.cat([u[:,0,:].unsqueeze(1),u],dim=1)
             x = self.vae(i[:,0,:],x_init,u[:,0])
+            xs = []
             for k in trange(1,i.shape[1]):
                 x = self.vae(i[:,k,:],x,u[:,k])
                 xs.append(x)
@@ -201,24 +199,26 @@ class InDCBFController(torch.nn.Module):
                 states = self.compute_states(output[0], output[1], self.params[layer_name]['sig_alpha'], retain_graph=retain_graph)
                 if len(states) > 0:
                     self.estimator_dict[layer_name].update(states)
+        for layer_name, output in layer_output_dict.items():
+            self.estimator_dict[layer_name].get_score()
 
-    def compute_states(self, h, outputs,layer_name, sig_alpha, retain_graph=False, **kwargs):
+    def compute_states(self, h, outputs, sig_alpha, retain_graph=False, **kwargs):
         baseline = torch.zeros_like(outputs)
-
         loss = F.mse_loss(baseline,outputs)
         layer_grad = torch.autograd.grad(loss.sum(), h, create_graph=False,
                                         retain_graph=retain_graph, **kwargs)[0]
         states = sigmoid(h*layer_grad, sig_alpha=sig_alpha)
         return states
 
-    def nac_filter(self,u,x,dt=0.05):
+    def nac_filter(self,u,x,dt,test_size):
         def odefunc(t,state):
             f, g = self.ode(state)
             gu = torch.bmm(g.view(g.shape[0],-1,self.n_control),u.unsqueeze(-1))
             return f + gu.squeeze(-1)
         timesteps = torch.Tensor([0,dt]).to(self.device)
         x_tide = odeint(odefunc,x,timesteps,rtol=5e-6)[1,:,:]
-        for _ in range(self.test_size):
+        scores = torch.zeros(x_tide.shape[0]).to(self.device)
+        for _ in range(test_size):
             u_p = self.model_ref.generate(x_tide)
             def odefunc(t,state):
                 f, g = self.ode(state)
@@ -227,11 +227,11 @@ class InDCBFController(torch.nn.Module):
             timesteps = torch.Tensor([0,dt]).to(self.device)
             x_tide = odeint(odefunc,x_tide,timesteps,rtol=5e-6)[1,:,:]
             layer_output_dict = self.ode.get_layer_output(x_tide)
-            scores = torch.zeros(x_tide.shape[0]).to(self.device)
             for idx, layer_name, output in enumerate(layer_output_dict.items()):
                 retain_graph = False if idx == len(layer_output_dict.keys()) - 1 else True
                 states = self.compute_states(output[0], output[1], self.params[layer_name]['sig_alpha'], retain_graph=retain_graph)
                 scores += self.estimator_dict[layer_name].ood_test(states) / self.layer_num
+        scores /= test_size
         return scores
 
 class InDCBFTrainer(pl.LightningModule):
@@ -240,7 +240,6 @@ class InDCBFTrainer(pl.LightningModule):
         self.model = model
         self.args = args
         self.curr_device = None
-        self.save_hyperparameters(ignore=model)
     
     def forward(self,i,u,x=None):
         return self.model(i,u,x)
