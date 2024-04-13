@@ -96,6 +96,6 @@ class RACCARDataset(LightningDataModule):
             self.val_dataset,
             batch_size=144,
             num_workers=self.num_workers,
-            shuffle=True,
+            shuffle=False,
             pin_memory=self.pin_memory,
         )

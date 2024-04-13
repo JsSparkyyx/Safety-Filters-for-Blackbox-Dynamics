@@ -21,30 +21,33 @@ def main(args):
                  callbacks=[
                      ModelCheckpoint(save_top_k=2, 
                                      dirpath =os.path.join(tb_logger.log_dir , "checkpoints"), 
-                                     monitor= "mse_loss",
+                                     monitor= "val_loss",
                                      save_last= True),
                  ],
                  max_epochs=args['max_epochs'],
                  gpus = [0])
-
+    
     Path(f"{tb_logger.log_dir}/Samples").mkdir(exist_ok=True, parents=True)
-    Path(f"{tb_logger.log_dir}/Reconstructions").mkdir(exist_ok=True, parents=True)
+    Path(f"{tb_logger.log_dir}/ReconDynamic").mkdir(exist_ok=True, parents=True)
+    Path(f"{tb_logger.log_dir}/ReconDecode").mkdir(exist_ok=True, parents=True)
+    Path(f"{tb_logger.log_dir}/Latent").mkdir(exist_ok=True, parents=True)
+    Path(f"{tb_logger.log_dir}/LatentDynamic").mkdir(exist_ok=True, parents=True)
     runner.fit(trainer, datamodule=data)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--learning_rate',  '-lr', default=0.005)
+    parser.add_argument('--learning_rate',  '-lr', default=0.001)
     parser.add_argument('--weight_decay',  '-wd', default=0)
-    parser.add_argument('--w_latent',  '-wl', default=0.4)
-    parser.add_argument('--w_dyn',  '-wdy', default=0.3)
+    parser.add_argument('--w_latent',  '-wl', default=0.6)
+    parser.add_argument('--w_dyn',  '-wdy', default=1)
     parser.add_argument('--w_recon',  '-wr', default=0.3)
     parser.add_argument('--seed',  '-s', default=42)
-    parser.add_argument('--train_batch_size', default=2)
-    parser.add_argument('--val_batch_size', default=1)
+    parser.add_argument('--train_batch_size', default=32)
+    parser.add_argument('--val_batch_size', default=16)
     parser.add_argument('--num_workers', default=4)
     parser.add_argument('--max_epochs',  '-epoch', default=100)
-    parser.add_argument('--latent_dim', default=64)
-    parser.add_argument('--data_path',  '-tp', default="./trajectories/1")
+    parser.add_argument('--latent_dim', default=128)
+    parser.add_argument('--data_path',  '-tp', default="./trajectories/0")
     parser.add_argument('--save_path',  '-sp', default="./logs/")
     parser.add_argument('--name', default="DynamicLearning")
     args = parser.parse_args()._get_kwargs()
