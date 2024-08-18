@@ -125,7 +125,8 @@ class Barrier(torch.nn.Module):
     def __init__(self,
                  n_control,
                  latent_dim,
-                 h_dim = 1024,
+                 h_dim = 64,
+                #  h_dim = 1024,
                  eps_safe = 1,
                  eps_unsafe = 1,
                  eps_ascent = 1,
@@ -141,12 +142,13 @@ class Barrier(torch.nn.Module):
                  ):
         super(Barrier, self).__init__()
         modules = []
-        hidden_dims = [latent_dim,h_dim,h_dim,h_dim,1]
+        # hidden_dims = [latent_dim,h_dim,h_dim,h_dim,1]
+        hidden_dims = [latent_dim,h_dim,1]
         for i in range(len(hidden_dims)-1):
             modules.append(torch.nn.Linear(hidden_dims[i], hidden_dims[i+1]))
-            if not i == len(hidden_dims)-2:
-                modules.append(torch.nn.ReLU())
-        modules.append(torch.nn.Tanh())
+            # if not i == len(hidden_dims)-2:
+            #     modules.append(torch.nn.ReLU())
+        # modules.append(torch.nn.Tanh())
         self.cbf = torch.nn.Sequential(*modules)
         self.n_control = n_control
         self.eps_safe = eps_safe
@@ -183,18 +185,21 @@ class Barrier(torch.nn.Module):
         loss_3 = F.relu((eps_bound-b_bound).abs()).sum(dim=-1).mean()
         output = {"loss_safe":self.w_safe*loss_1,"loss_unsafe":self.w_unsafe*loss_2,"loss_bound":self.w_unsafe*loss_3,"b_safe":b_safe.mean(),"b_unsafe":b_unsafe.mean(),"b_bound":b_bound.mean()}
         if self.with_nonzero:
-            x_g = x_bound.clone().detach()
-            x_g.requires_grad = True
+            # x_g = x_bound.clone().detach()
+            # x_g = x.clone().detach()
+            # x_g.requires_grad = True
+            x_g = x
             b = self.forward(x_g)
             d_b_bound = torch.autograd.grad(b.mean(),x_g,retain_graph=True)[0]
             # with torch.no_grad():
             #     f, g = ode(x_g)
             f, g = ode(x_g)
-            gu = torch.einsum('btha,bta->bth',g.view(g.shape[0],g.shape[1],f.shape[-1],self.n_control),u[label == 2])
-            dBg = torch.einsum('bth,bth->bt', d_b_bound, gu)
-            output['loss_nonzero'] = self.w_non_zero*torch.exp(-self.w_lambda*dBg.abs()).sum(dim=-1).mean()
+            dBg = torch.einsum('bth,btha->bta', d_b_bound, g.view(g.shape[0],g.shape[1],f.shape[-1],self.n_control))
+            output['loss_nonzero'] = self.w_non_zero*torch.exp(-self.w_lambda*dBg).norm(dim=-1).mean()
             output['dB*g'] = dBg.abs().mean()
+            output['dB'] = d_b_bound.abs().mean()
             if self.with_gradient:
+                gu = torch.einsum('btha,bta->bth',g.view(g.shape[0],g.shape[1],f.shape[-1],self.n_control),u[label == 2])
                 descent_value = torch.einsum('bth,bth->bt', d_b_bound, (f + gu))
                 loss_4 = F.relu(self.eps_descent + descent_value.unsqueeze(-1) + b_bound).sum(dim=-1).mean()
                 output['loss_grad_descent'] = self.w_grad*loss_4
@@ -274,6 +279,7 @@ class InDCBFTrainer(pl.LightningModule):
                 train_loss['loss_nonzero'] = output['loss_nonzero']
                 train_loss['loss'] += output['loss_nonzero']*self.w_barrier
                 self.log_dict({'dB*g':output['dB*g']},sync_dist=True)
+                self.log_dict({'dB':output['dB']},sync_dist=True)
             if batch_idx % 5 == 0:
                 print()
                 print(output['b_safe'])
@@ -283,6 +289,7 @@ class InDCBFTrainer(pl.LightningModule):
                     print(output['b_acsent'])
                 if self.barrier.with_nonzero:
                     print(output['dB*g'])
+                    print(output['dB'])
                 print()
                 print(train_loss)
                 print()

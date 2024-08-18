@@ -5,115 +5,88 @@ import torch
 import os
 from torch import nn
 from torchdiffeq import odeint
-from tqdm import trange, tqdm
+from tqdm import trange
 from torchvision.utils import save_image
+import cvxpy as cp
+from cvxpylayers.torch import CvxpyLayer
 
-def build_mlp(hidden_dims,dropout=0,activation=nn.ReLU,with_bn=True,no_act_last_layer=False):
-    modules = nn.ModuleDict()
+def build_mlp(hidden_dims,dropout=0,activation=torch.nn.ReLU,with_bn=False,no_act_last_layer=False):
+    modules = []
     for i in range(len(hidden_dims)-1):
-        modules[f'linear_{i}'] = nn.Linear(hidden_dims[i], hidden_dims[i+1])
+        modules.append(torch.nn.Linear(hidden_dims[i], hidden_dims[i+1]))
         if not (no_act_last_layer and i == len(hidden_dims)-2):
             if with_bn:
-                modules[f'batchnorm_{i}'] = nn.BatchNorm1d(hidden_dims[i+1])
-            modules[f'activation_{i}'] = activation()
+                modules.append(torch.nn.BatchNorm1d(hidden_dims[i+1]))
+            modules.append(activation())
             if dropout > 0.:
-                modules[f'dropout_{i}'] = nn.Dropout(p=dropout)
-    return modules
+                modules.append(torch.nn.Dropout(p=dropout))
+    return torch.nn.Sequential(*modules)
 
-class VAE(torch.nn.Module):
-    def __init__(self,in_channels,n_control,latent_dim,hidden_dims=None):
-        super(VAE, self).__init__()
-        encoder = []
-        decoder = []
-        if hidden_dims is None:
-            hidden_dims = [16, 32, 64, 128, 256, 512]
-        for h_dim in hidden_dims:
-            encoder.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels=h_dim,
-                                kernel_size= 3, stride= 2, padding  = 1),
-                    nn.BatchNorm2d(h_dim),
-                    nn.LeakyReLU())
-            )
-            in_channels = h_dim
-        self.encoder = nn.Sequential(*encoder)
-        self.encoder_latent = nn.Linear(hidden_dims[-1]*16+latent_dim+n_control, latent_dim)
-        hidden_dims.reverse()
-        self.decoder_latent = nn.Linear(latent_dim, hidden_dims[0]*16)
-        for i in range(len(hidden_dims) - 1):
-            decoder.append(
-                nn.Sequential(
-                    nn.ConvTranspose2d(hidden_dims[i],
-                                        hidden_dims[i + 1],
-                                        kernel_size=3,
-                                        stride = 2,
-                                        padding=1,
-                                        output_padding=1),
-                    nn.BatchNorm2d(hidden_dims[i + 1]),
-                    nn.LeakyReLU())
-        )
-        self.decoder = nn.Sequential(*decoder)
-        self.final_layer = nn.Sequential(
-                            nn.ConvTranspose2d(hidden_dims[-1],
-                                               hidden_dims[-1],
-                                               kernel_size=3,
-                                               stride=2,
-                                               padding=1,
-                                               output_padding=1),
-                            nn.BatchNorm2d(hidden_dims[-1]),
-                            nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
-                                      kernel_size= 3, padding= 1),
-                            nn.Tanh())
-        self.hidden_dims = hidden_dims
-
-    def forward(self,i,x,u):
-        latent = self.encoder(i).view(i.shape[0],-1)
-        latent = torch.cat((latent,x,u),1)
-        return self.encoder_latent(latent)
+class Encoder(torch.nn.Module):
+    def __init__(self,latent_dim,n_control=2,model="google/vit-base-patch16-224",vit_dim=768,num_cam=6,freeze_ViT=True):
+        super(Encoder, self).__init__()
+        if "clip" in model:
+            from transformers import CLIPVisionModel
+            self.ViT = CLIPVisionModel.from_pretrained(model)
+        else:
+            from transformers import ViTModel
+            self.ViT = ViTModel.from_pretrained(model)
+        if freeze_ViT:
+            for n,p in self.ViT.named_parameters():
+                if "pooler" not in n:
+                    p.requires_grad = False
+        self.mlp = build_mlp([vit_dim+num_cam,latent_dim,latent_dim])
+        self.attention = torch.nn.parameter.Parameter(torch.rand((num_cam,latent_dim)))
+        self.linear = torch.nn.Linear(2*latent_dim+n_control,latent_dim)
+        self.num_cam = num_cam
     
-    def reconstruct(self,latent):
-        B,T = latent.shape[:2]
-        latent = self.decoder_latent(latent)
-        latent = latent.view(B*T,self.hidden_dims[0],4,4)
-        latent = self.decoder(latent)
-        latent = self.final_layer(latent)
-        latent = F.interpolate(latent, size=[224, 224])
-        C,H,W = latent.shape[1:]
-        return latent.view(B,T,C,H,W)
-
-class NeuralODE(nn.Module):
-    def __init__(self,params_f,params_g):
-        super(NeuralODE, self).__init__()
-        self.ode_f = build_mlp(params_f,with_bn=False)
-        self.ode_g = build_mlp(params_g,with_bn=False)
-        self.num_f = len(params_f)-1
-        self.num_g = len(params_g)-1
-
-    def forward(self,x):
-        f = x
-        g = x
-        for layer in self.ode_f.keys():
-            f = self.ode_f[layer](f)
-        for layer in self.ode_g.keys():
-            g = self.ode_g[layer](g)
-        return f,g
+    def forward(self,imgs,x_p,u_p):
+        B,N,C,H,W = imgs.shape
+        with torch.no_grad():
+            outputs = self.ViT(pixel_values=imgs.reshape(-1,C,H,W))
+        pos_encoding = torch.eye(self.num_cam).expand(imgs.shape[0],-1,-1).to(imgs.device)
+        rep = torch.cat([outputs.pooler_output.reshape(B,N,-1),pos_encoding],dim=-1)
+        rep = self.mlp(rep)
+        weight = torch.einsum("bch,bch->bc",self.attention.expand(B,-1,-1),rep)
+        final_rep = torch.einsum("bn,bnh->bnh",weight,rep).sum(1)
+        final_rep = torch.cat([final_rep,x_p,u_p],dim=-1)
+        return self.linear(final_rep)
 
 class InDCBFController(torch.nn.Module):
-    def __init__(self,C,n_control,model_ref,device,latent_dim=256,h_dim=256):
+    def __init__(self,n_control,device,model,latent_dim=256,h_dim=1024):
         super(InDCBFController, self).__init__()
-        self.model_ref = model_ref
         self.latent_dim = latent_dim
         self.device = device
-        self.vae = VAE(C,n_control,latent_dim)
+        self.encoder = Encoder(latent_dim,model=model)
         self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
 
+    def forward(self,i,u_p,x_p,u_ref,barrier):
+        u_ref = u_ref.view(-1).cpu().numpy()
+        x = self.encoder(i,x_p,u_p)
+        f, g = self.ode(x)
+        f = f.view(-1).detach().cpu().numpy()
+        g = g.view(-1,2).detach().cpu().numpy()
+        b = barrier(x)
+        d_b = torch.autograd.grad(b,x,retain_graph=True)[0]
+        b = b.view(-1).detach().cpu().numpy()
+        x = x.view(-1).detach().cpu().numpy()
+        d_b = d_b.view(-1).cpu().numpy()
+        u = cp.Variable(u_ref.shape)
+        t1 = d_b @ f
+        t2 = d_b @ g 
+        t3 = b
+        objective = cp.Minimize(cp.sum_squares(u - u_ref))
+        constraints = [(t1+t2@u+t3)>=0]
+        prob = cp.Problem(objective, constraints)
+        result = prob.solve()
+        return u, result, prob
+
     def simulate(self,i,u,dt=0.1,window_size=5,rtol=5e-6):
         x_init = torch.zeros(i.shape[0],self.latent_dim).to(self.device)
         u = torch.cat([u[:,0,:].unsqueeze(1),u],dim=1)
-        x = self.vae(i[:,0,:],x_init,u[:,0])
+        x = self.encoder(i[:,0,:],x_init,u[:,0])
         x_tide = x
         xs = [x]
         x_tides = [x_tide]
@@ -126,85 +99,112 @@ class InDCBFController(torch.nn.Module):
                 return f + gu.squeeze(-1)
             timesteps = torch.Tensor([0,dt]).to(self.device)
             x_tide = odeint(odefunc,x_tide,timesteps,rtol=rtol)[1,:,:]
-            x = self.vae(i[:,k,:],x,u[:,k])
+            x = self.encoder(i[:,k,:],x,u[:,k])
             xs.append(x)
             x_tides.append(x_tide)
         xs = torch.stack(xs,dim=1)
         x_tides = torch.stack(x_tides,dim=1)
-        i_hat = self.vae.reconstruct(xs)
-        i_tide = self.vae.reconstruct(x_tides)
-        return  (xs,x_tides,i_hat,i_tide)
-
-    def forward(self,i,u,x=None,dt=0.05,threshold=0.5,sample_size=200,test_size=20):
-        if x is None:
-            x = torch.zeros(i.shape[0],self.latent_dim)
-        x = self.vae(x,i,u)
-        for _ in range(sample_size):
-            u = self.model_ref.generate(x)
-            scores = self.nac_filter(u,x,dt,test_size)
-            if scores >= threshold:
-                return u
-        return self.model_ref.generate(x)
+        return (xs,x_tides)
     
-    def loss_function(self,i,i_hat,i_tide,x,x_tide):
+    def loss_function(self,x,x_tide):
         loss_latent = F.mse_loss(x,x_tide)
-        loss_dyn = F.mse_loss(i,i_tide)
-        loss_recon = F.mse_loss(i,i_hat)
-        return {'loss_latent': loss_latent,'loss_dyn': loss_dyn,'loss_recon': loss_recon}
+        return {'loss_latent': loss_latent}
 
-class Barrier(torch.nn.Module):
-    def __init__(self,
-                 latent_dim,
-                 n_control,
-                 h_dim = 512,
-                 eps_safe = 0.001,
-                 eps_unsafe = 0.001,
-                 eps_ascent = 0.001,
-                 w_safe = 0.5,
-                 w_unsafe = 0.5,
-                 w_ascent = 0.3,
-                 ):
-        super(Barrier, self).__init__()
-        self.cbf = build_mlp([latent_dim,h_dim,h_dim,1],with_bn=False)
-        self.eps_safe = eps_safe
-        self.n_control = n_control
-        self.eps_unsafe = eps_unsafe
-        self.eps_ascent = eps_ascent
-        self.w_safe = w_safe
-        self.w_unsafe = w_unsafe
-        self.w_ascent = w_ascent
+class NeuralODE(nn.Module):
+    def __init__(self,params_f,params_g):
+        super(NeuralODE, self).__init__()
+        self.ode_f = build_mlp(params_f)
+        self.ode_g = build_mlp(params_g)
+        self.num_f = len(params_f)-1
+        self.num_g = len(params_g)-1
 
     def forward(self,x):
-        for layer in self.cbf.keys():
-            x = self.cbf[layer](x)
-        return x
+        return self.ode_f(x),self.ode_g(x)
+    
+class Barrier(torch.nn.Module):
+    def __init__(self,
+                 n_control,
+                 latent_dim,
+                 h_dim = 64,
+                #  h_dim = 1024,
+                 eps_safe = 1,
+                 eps_unsafe = 1,
+                 eps_ascent = 1,
+                 eps_descent = 1,
+                 w_safe=1,
+                 w_unsafe=1,
+                 w_grad=1,
+                 w_non_zero=1,
+                 w_lambda=1,
+                 with_gradient=False,
+                 with_nonzero=False,
+                 **kwargs
+                 ):
+        super(Barrier, self).__init__()
+        modules = []
+        # hidden_dims = [latent_dim,h_dim,h_dim,h_dim,1]
+        hidden_dims = [latent_dim,h_dim,h_dim,1]
+        for i in range(len(hidden_dims)-1):
+            modules.append(torch.nn.Linear(hidden_dims[i], hidden_dims[i+1]))
+            if not i == len(hidden_dims)-2:
+                modules.append(torch.nn.ReLU())
+        modules.append(torch.nn.Tanh())
+        self.cbf = torch.nn.Sequential(*modules)
+        self.n_control = n_control
+        self.eps_safe = eps_safe
+        self.eps_unsafe = eps_unsafe
+        self.eps_ascent = eps_ascent
+        self.eps_descent = eps_descent
+        self.w_safe = w_safe
+        self.w_unsafe = w_unsafe
+        self.w_grad = w_grad
+        self.w_non_zero = w_non_zero
+        self.w_lambda = w_lambda
+        self.with_gradient = with_gradient
+        self.with_nonzero = with_nonzero
 
-    def loss_function(self,x,label,u,ode,dt = 0.1,rtol=5e-6):
-        N = label.shape[0]
+    def forward(self,x):
+        return self.cbf(x)
+
+    def loss_function(self,x,label,u,ode):
+        # x = x.detach()
         label = label.squeeze(dim=-1)
-        N_unsafe = label.sum()
-        N_safe = N - N_unsafe
         x_safe = x[label == 0]
         x_unsafe = x[label == 1]
         b_safe = self.forward(x_safe)
         b_unsafe = self.forward(x_unsafe)
-        loss_1 = 1*F.relu(self.eps_safe-b_safe).sum()/(1e-5 + N_safe)
-        loss_2 = 2*F.relu(self.eps_unsafe+b_unsafe).sum()/(1e-5 + N_unsafe)
+        eps_safe = self.eps_safe*torch.ones_like(b_safe)
+        eps_unsafe = self.eps_unsafe*torch.ones_like(b_unsafe)
+        loss_1 = F.relu(eps_safe-b_safe).sum(dim=-1).mean()
+        loss_2 = F.relu(eps_unsafe+b_unsafe).sum(dim=-1).mean()
+        output = {"loss_safe":self.w_safe*loss_1,"loss_unsafe":self.w_unsafe*loss_2,"b_safe":b_safe.mean(),"b_unsafe":b_unsafe.mean()}
         x_g = x_safe.clone().detach()
         x_g.requires_grad = True
         b = self.forward(x_g)
         d_b_safe = torch.autograd.grad(b.mean(),x_g,retain_graph=True)[0]
         with torch.no_grad():
-            f, g = ode(x_safe)
-        print(b_safe.flatten())
-        gu = torch.einsum('btha,bta->bth',g.view(g.shape[0],g.shape[1],-1,self.n_control),u[label == 0])
+            f, g = ode(x_g)
+        gu = torch.einsum('btha,bta->bth',g.view(g.shape[0],g.shape[1],f.shape[-1],self.n_control),u[label == 0])
         ascent_value = torch.einsum('bth,bth->bt', d_b_safe, (f + gu))
-        print(d_b_safe)
-        loss_3 = 1*F.relu(self.eps_ascent - ascent_value.unsqueeze(-1) + b_safe).sum()/(1e-5 + N_safe)
-        return loss_1, loss_2, loss_3
-    
+        loss_3 = F.relu(self.eps_ascent - ascent_value.unsqueeze(-1) - b_safe).sum(dim=-1).mean()
+        output['loss_grad_ascent'] = self.w_grad*loss_3
+        output['b_grad_ascent'] = (ascent_value.unsqueeze(-1) + b_safe).mean()
+        return output
+        
 class InDCBFTrainer(pl.LightningModule):
-    def __init__(self,model,barrier,learning_rate=0.001,weight_decay=0,w_barrier=10,w_latent=5,w_dyn=5,w_recon=0.5,window_size=5,rtol=5e-6,dt=0.05,**kwargs):
+    def __init__(self,
+                 model,
+                 barrier = None,
+                 learning_rate=0.001,
+                 weight_decay=0,
+                 w_barrier=2,
+                 w_latent=1,
+                 window_size=5,
+                 rtol=5e-6,
+                 dt=0.05,
+                 with_dynamic=True,
+                 train_barrier=False,
+                 **kwargs):
         super(InDCBFTrainer,self).__init__()
         self.model = model
         self.barrier = barrier
@@ -215,12 +215,12 @@ class InDCBFTrainer(pl.LightningModule):
         self.dt = dt
         self.w_latent = w_latent
         self.w_barrier = w_barrier
-        self.w_dyn = w_dyn
-        self.w_recon = w_recon
         self.curr_device = None
-        self.save_hyperparameters(ignore=['model'])
-        print('----hyper parameters----')
-        print(self.hparams)
+        self.train_barrier = train_barrier
+        self.with_dynamic = with_dynamic
+        self.save_hyperparameters(ignore=['model','barrier'])
+        # print('----hyper parameters----')
+        # print(self.hparams)
     
     def forward(self,i,u,x=None):
         return self.model(i,u,x)
@@ -229,66 +229,78 @@ class InDCBFTrainer(pl.LightningModule):
         i, u, label = batch
         self.curr_device = i.device
 
-        x,x_tide,i_hat,i_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
-        train_loss = self.model.loss_function(i,i_hat,i_tide,x,x_tide)
-        # barrier_loss = self.barrier.loss_function(x,label,u,self.model.ode,dt=self.dt,rtol=self.rtol)
-        # train_loss['barrier_loss0'] = barrier_loss[0]
-        # train_loss['barrier_loss1'] = barrier_loss[1]
-        # train_loss['barrier_loss2'] = barrier_loss[2]
-        train_loss['loss'] = train_loss['loss_latent']*self.w_latent \
-               + train_loss['loss_dyn']*self.w_dyn \
-               + train_loss['loss_recon']*self.w_recon \
-            #    + (train_loss['barrier_loss0'])*self.w_barrier\
-            #    + (train_loss['barrier_loss1'])*self.w_barrier\
-            #    + (train_loss['barrier_loss2'])*self.w_barrier
+        x,x_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
+        train_loss = self.model.loss_function(x,x_tide)
+        train_loss['loss'] = 0
+        if self.with_dynamic:
+            train_loss['loss'] += train_loss['loss_latent']*self.w_latent
+        if self.train_barrier:
+            output = self.barrier.loss_function(x,label,u,self.model.ode)
+            train_loss['loss_safe'] = output['loss_safe']
+            train_loss['loss_unsafe'] = output['loss_unsafe']
+            train_loss['loss_grad_ascent'] = output['loss_grad_ascent']
+            train_loss['loss'] += output['loss_safe']*self.w_barrier+output['loss_unsafe']*self.w_barrier
+            train_loss['loss'] += output['loss_grad_ascent']*self.w_barrier
+            self.log_dict({'b_safe':output['b_safe'],'b_unsafe':output['b_unsafe']},sync_dist=True)
+            self.log_dict({'b_grad_ascent':output['b_grad_ascent']},sync_dist=True)
+            if batch_idx % 5 == 0:
+                print()
+                print(output['b_safe'])
+                print(output['b_unsafe'])
+                print(output['b_grad_ascent'])
+                print()
+                print(train_loss)
+                print()
         self.log_dict({key: val.item() for key, val in train_loss.items()}, sync_dist=True)
-        # print()
-        # print()
-        # print(train_loss['barrier_loss0'])
-        # print(train_loss['barrier_loss1'])
-        # print(train_loss['barrier_loss2'])
-        # print(train_loss['loss_latent'])
-        # print(train_loss['loss_dyn'])
         return train_loss['loss']
 
     def validation_step(self, batch, batch_idx):
+        torch.set_grad_enabled(True)
         i, u, label = batch
         self.curr_device = i.device
 
-        x,x_tide,i_hat,i_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
-        val_loss = self.model.loss_function(i,i_hat,i_tide,x,x_tide)
-        # barrier_loss = self.barrier.loss_function(x,label,u,self.model.ode,dt=self.dt,rtol=self.rtol)
-        # val_loss['barrier_loss'] = barrier_loss
-        val_loss['loss'] = val_loss['loss_latent']*self.w_latent \
-               + val_loss['loss_dyn']*self.w_dyn \
-               + val_loss['loss_recon']*self.w_recon \
-            #    + val_loss['barrier_loss']*self.w_barrier
+        x,x_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
+        val_loss = self.model.loss_function(x,x_tide)
+        val_loss['loss'] = 0
+        if self.with_dynamic:
+            val_loss['loss'] += val_loss['loss_latent']*self.w_latent
+        if self.train_barrier:
+            output = self.barrier.loss_function(x,label,u,self.model.ode)
+            val_loss['loss_safe'] = output['loss_safe']
+            val_loss['loss_unsafe'] = output['loss_unsafe']
+            val_loss['loss_grad_ascent'] = output['loss_grad_ascent']
+            val_loss['loss'] += output['loss_safe']*self.w_barrier+output['loss_unsafe']*self.w_barrier
+            val_loss['loss'] += output['loss_grad_ascent']*self.w_barrier
+            self.log_dict({'val_b_safe':output['b_safe'],'val_b_unsafe':output['b_unsafe']},sync_dist=True)
+            self.log_dict({'val_b_grad_ascent':output['b_grad_ascent']},sync_dist=True)
         self.log_dict({f"val_{key}": val.item() for key, val in val_loss.items()}, sync_dist=True)
+    
+    def on_train_epoch_end(self) -> None:
+        # min_eps = 0.1
+        # step_eps = (0.25-min_eps)/100
+        # max_w = 1
+        # step_w = (max_w-0.4)/100
+        # self.barrier.eps_unsafe -= step_eps
+        # self.barrier.eps_ascent -= step_eps
+        # self.barrier.w_unsafe += step_w
+        pass
 
     def on_validation_end(self) -> None:
-        self.sample_images()
+        # self.sample_states()
+        pass
+    
+    # def on_train_epoch_start(self):
+    #     if self.current_epoch == 10:
+    #         self.barrier.w_safe = 5
+    #         self.barrier.w_unsafe = 1
+    #         self.barrier.w_grad = 1
 
-    def sample_images(self):          
-        i, u, label = next(iter(self.trainer.datamodule.test_dataloader()))
+    def sample_states(self):          
+        i, u, label = next(iter(self.trainer.datamodule.val_dataloader()))
         i = i.to(self.curr_device)
         u = u.to(self.curr_device)
 
-        x,x_tide,i_hat,i_tide = self.model.simulate(i,u)
-        save_image(i_hat.data[0],
-                          os.path.join(self.logger.log_dir , 
-                                       "ReconDecode", 
-                                       f"recon_decode_Epoch_{self.current_epoch}.png"),
-                              nrow=self.window_size)
-        save_image(i_tide.data[0],
-                          os.path.join(self.logger.log_dir , 
-                                       "ReconDynamic", 
-                                       f"recon_dynamic_Epoch_{self.current_epoch}.png"),
-                              nrow=self.window_size)
-        save_image(i.data[0],
-                          os.path.join(self.logger.log_dir , 
-                                       "Samples", 
-                                       f"sample_Epoch_{self.current_epoch}.png"),
-                              nrow=self.window_size)
+        x,x_tide = self.model.simulate(i,u)
         np.savetxt(os.path.join(self.logger.log_dir , 
                                        "Latent", 
                                        f"latent_Epoch_{self.current_epoch}.txt"),
@@ -297,9 +309,15 @@ class InDCBFTrainer(pl.LightningModule):
                                        "LatentDynamic", 
                                        f"latent_dynamic_Epoch_{self.current_epoch}.txt"),
                                        x_tide.data[0].cpu().numpy())
-
+        
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam([{"params":self.model.parameters(),"lr":self.learning_rate,"weight_decay":self.learning_rate},
-                                    #   {"params":self.barrier.parameters(),"lr":self.learning_rate,"weight_decay":self.learning_rate}
-                                    ],)
+        params = [{"params":self.model.parameters(),"lr":self.learning_rate,"weight_decay":self.learning_rate}]
+        if self.train_barrier:
+            params.append({"params":self.barrier.parameters(),"lr":self.learning_rate,"weight_decay":self.learning_rate}
+                                    )
+        optimizer = torch.optim.Adam(params)
         return optimizer
+    
+if __name__ == "__main__":
+    model = Encoder(512)
+    print(model)

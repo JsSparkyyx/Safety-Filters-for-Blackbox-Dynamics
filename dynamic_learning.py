@@ -1,4 +1,4 @@
-from method.InDCBF import InDCBFTrainer, InDCBFController, Barrier
+from method.InDCBF_old import InDCBFTrainer, InDCBFController, Barrier
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint

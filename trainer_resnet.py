@@ -1,4 +1,4 @@
-from method.ViT import InDCBFTrainer, InDCBFController, Barrier
+from method.ResNet import InDCBFTrainer, InDCBFController, Barrier
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -32,17 +32,17 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--backbone',  '-b', default="openai/clip-vit-base-patch16")
-    parser.add_argument('--backbone',  '-b', default="google/vit-base-patch16-224")
+    parser.add_argument('--backbone',  '-b', default="resnet50")
+    # parser.add_argument('--backbone',  '-b', default="google/vit-base-patch16-224")
     parser.add_argument('--learning_rate',  '-lr', default=0.001)
     parser.add_argument('--weight_decay',  '-wd', default=0)
     parser.add_argument('--w_barrier',  '-wb', default=1)
     parser.add_argument('--w_latent',  '-wl', default=1)
+    parser.add_argument('--w_dyn',  '-wdy', default=1)
+    parser.add_argument('--w_recon',  '-wr', default=1)
     parser.add_argument('--w_safe', default=1)
     parser.add_argument('--w_unsafe', default=1)
     parser.add_argument('--w_grad', default=1)
-    parser.add_argument('--w_non_zero', default=1)
-    parser.add_argument('--w_lambda', default=5)
     parser.add_argument('--eps_safe', default=0.5)
     parser.add_argument('--eps_unsafe', default=0.5)
     parser.add_argument('--eps_ascent', default=0.5)
@@ -56,11 +56,10 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', default=16)
     parser.add_argument('--train_barrier', default=True)
     parser.add_argument('--with_dynamic', default=True)
-    parser.add_argument('--with_gradient', default=False)
-    parser.add_argument('--max_epochs',  '-epoch', default=100)
-    parser.add_argument('--latent_dim', default=8)
+    parser.add_argument('--max_epochs',  '-epoch', default=30)
+    parser.add_argument('--latent_dim', default=16)
     parser.add_argument('--save_path',  '-sp', default="/root/tf-logs/")
-    parser.add_argument('--name', default="Barrier")
+    parser.add_argument('--name', default="InDCBF")
     # parser.add_argument('--with_nonzero', default=False)
     # parser.add_argument('--dynamic_path', default="/root/tf-logs/Dynamic/version_0/checkpoints/last.ckpt")
     parser.add_argument('--with_nonzero', default=True)
@@ -70,10 +69,4 @@ if __name__ == '__main__':
     args['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
     args['split_trajectory'] = True
     seed_everything(args['seed'])
-    if args['with_gradient'] and args['with_nonzero']:
-        args['name'] = "BarrierAll"
-    elif args['with_nonzero']:
-        args['name'] = "BarrierNonzero"
-    else:
-        args['name'] = "BarrierClassifier"
     main(args)

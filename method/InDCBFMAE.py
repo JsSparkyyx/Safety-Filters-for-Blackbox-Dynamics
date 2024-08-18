@@ -22,16 +22,33 @@ def build_mlp(hidden_dims,dropout=0,activation=torch.nn.ReLU,with_bn=False,no_ac
                 modules.append(torch.nn.Dropout(p=dropout))
     return torch.nn.Sequential(*modules)
 
-class Encoder(torch.nn.Module):
-    def __init__(self,latent_dim,n_control=2,model="resnet34",res_dim=1000,num_cam=6):
-        super(Encoder, self).__init__()
-        if "34" in model:
-            from torchvision.models import resnet34
-            self.ResNet = resnet34(num_classes=res_dim)
-        else:
-            from torchvision.models import resnet50
-            self.ResNet = resnet50(num_classes=res_dim,pretrained=True)
-        self.mlp = build_mlp([res_dim+num_cam,latent_dim,latent_dim])
+class ViTPooler(nn.Module):
+    def __init__(self, hidden_size=768):
+        super().__init__()
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states):
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+class MAE(torch.nn.Module):
+    def __init__(self,latent_dim,n_control=2,model="google/vit-base-patch16-224",vit_dim=768,num_cam=6,freeze_ViT=True):
+        super(MAE, self).__init__()
+        if "mae" in model:
+            from transformers import ViTMAEForPreTraining
+            self.model = ViTMAEForPreTraining.from_pretrained(model)
+            self.encoder = self.model.vit
+            self.decoder = self.model.decoder
+        if freeze_ViT:
+            for n,p in self.model.named_parameters():
+                if "pooler" not in n:
+                    p.requires_grad = False
+        self.mlp = build_mlp([vit_dim+num_cam,latent_dim,latent_dim])
         self.attention = torch.nn.parameter.Parameter(torch.rand((num_cam,latent_dim)))
         self.linear = torch.nn.Linear(2*latent_dim+n_control,latent_dim)
         self.num_cam = num_cam
@@ -39,9 +56,9 @@ class Encoder(torch.nn.Module):
     def forward(self,imgs,x_p,u_p):
         B,N,C,H,W = imgs.shape
         with torch.no_grad():
-            outputs = self.ResNet(imgs.reshape(-1,C,H,W))
+            outputs = self.encoder(pixel_values=imgs.reshape(-1,C,H,W))
         pos_encoding = torch.eye(self.num_cam).expand(imgs.shape[0],-1,-1).to(imgs.device)
-        rep = torch.cat([outputs.reshape(B,N,-1),pos_encoding],dim=-1)
+        rep = torch.cat([outputs.last_hidden_state.mean(1).reshape(B,N,-1),pos_encoding],dim=-1)
         rep = self.mlp(rep)
         weight = torch.einsum("bch,bch->bc",self.attention.expand(B,-1,-1),rep)
         final_rep = torch.einsum("bn,bnh->bnh",weight,rep).sum(1)
@@ -53,7 +70,7 @@ class InDCBFController(torch.nn.Module):
         super(InDCBFController, self).__init__()
         self.latent_dim = latent_dim
         self.device = device
-        self.encoder = Encoder(latent_dim,model=model)
+        self.encoder = MAE(latent_dim,model=model)
         self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
@@ -100,11 +117,15 @@ class InDCBFController(torch.nn.Module):
             x_tides.append(x_tide)
         xs = torch.stack(xs,dim=1)
         x_tides = torch.stack(x_tides,dim=1)
-        return (xs,x_tides)
+        i_hat = self.vae.reconstruct(xs)
+        i_tide = self.vae.reconstruct(x_tides)
+        return (xs,x_tides,i_hat,i_tide)
     
-    def loss_function(self,x,x_tide):
+    def loss_function(self,i,i_hat,i_tide,x,x_tide):
         loss_latent = F.mse_loss(x,x_tide)
-        return {'loss_latent': loss_latent}
+        loss_dyn = F.mse_loss(i,i_tide)
+        loss_recon = F.mse_loss(i,i_hat)
+        return {'loss_latent': loss_latent,'loss_dyn': loss_dyn,'loss_recon': loss_recon}
 
 class NeuralODE(nn.Module):
     def __init__(self,params_f,params_g):
@@ -195,6 +216,8 @@ class InDCBFTrainer(pl.LightningModule):
                  weight_decay=0,
                  w_barrier=2,
                  w_latent=1,
+                 w_dyn=1,
+                 w_recon=1,
                  window_size=5,
                  rtol=5e-6,
                  dt=0.05,
@@ -211,6 +234,8 @@ class InDCBFTrainer(pl.LightningModule):
         self.dt = dt
         self.w_latent = w_latent
         self.w_barrier = w_barrier
+        self.w_dyn = w_dyn
+        self.w_recon = w_recon
         self.curr_device = None
         self.train_barrier = train_barrier
         self.with_dynamic = with_dynamic
@@ -225,11 +250,13 @@ class InDCBFTrainer(pl.LightningModule):
         i, u, label = batch
         self.curr_device = i.device
 
-        x,x_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
+        x,x_tide,i_hat,i_tide = self.model.simulate(i,u,dt=self.dt,window_size=self.window_size,rtol=self.rtol)
         train_loss = self.model.loss_function(x,x_tide)
         train_loss['loss'] = 0
         if self.with_dynamic:
             train_loss['loss'] += train_loss['loss_latent']*self.w_latent
+            train_loss['loss'] += train_loss['loss_dyn']*self.w_latent
+            train_loss['loss'] += train_loss['loss_recon']*self.w_latent
         if self.train_barrier:
             output = self.barrier.loss_function(x,label,u,self.model.ode)
             train_loss['loss_safe'] = output['loss_safe']
@@ -260,6 +287,8 @@ class InDCBFTrainer(pl.LightningModule):
         val_loss['loss'] = 0
         if self.with_dynamic:
             val_loss['loss'] += val_loss['loss_latent']*self.w_latent
+            val_loss['loss'] += val_loss['loss_dyn']*self.w_latent
+            val_loss['loss'] += val_loss['loss_recon']*self.w_latent
         if self.train_barrier:
             output = self.barrier.loss_function(x,label,u,self.model.ode)
             val_loss['loss_safe'] = output['loss_safe']

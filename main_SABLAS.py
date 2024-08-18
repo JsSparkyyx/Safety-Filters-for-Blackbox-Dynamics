@@ -1,4 +1,6 @@
-from method.ViT import InDCBFTrainer, InDCBFController, Barrier
+from method.dynamics import SABLASDynamics, InDCBFAttentionDynamics
+from method.barriers import SABLASBarrier, InDCBFAttentionBarrier
+from method.trainers import SABLASTrainer, InDCBFTrainer
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -12,11 +14,23 @@ import os
 def main(args):
     tb_logger = TensorBoardLogger(save_dir=args['save_path'],name=args['name'])
     data = DeepAccidentDataset(**args, pin_memory=True)
-    barrier = Barrier(2,**args)
-    model = InDCBFController(2,args['device'],model=args['backbone'],latent_dim=args['latent_dim'])
-    trainer = InDCBFTrainer(model,barrier,**args)
+
+    # barrier = InDCBFAttentionBarrier(2,**args)
+    # model = InDCBFAttentionDynamics(2,args['device'],model=args['backbone'],latent_dim=args['latent_dim'])
+    # trainer = InDCBFTrainer(model,barrier,**args)
     # checkpoint = torch.load(args['dynamic_path'])
     # trainer.load_state_dict(checkpoint['state_dict'])
+
+    # dynamics = trainer.model.ode
+    # encoder = trainer.model.encoder
+    barrier = SABLASBarrier(2,**args)
+    model = SABLASDynamics(2,args['device'],model=args['backbone'],latent_dim=args['latent_dim'])
+    trainer = SABLASTrainer(model,barrier,**args)
+    # trainer.model.encoder = encoder
+    # for p in trainer.model.encoder.parameters():
+    #     p.requires_grad = False
+    # for p in trainer.model.dynamics.parameters():
+    #     p.requires_grad = False
     runner = Trainer(logger=tb_logger,
                  callbacks=[
                      ModelCheckpoint(save_top_k=2, 
@@ -32,48 +46,41 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    # parser.add_argument('--backbone',  '-b', default="stabilityai/sd-vae-ft-mse")
     # parser.add_argument('--backbone',  '-b', default="openai/clip-vit-base-patch16")
-    parser.add_argument('--backbone',  '-b', default="google/vit-base-patch16-224")
+    parser.add_argument('--backbone',  '-b', default="resnet50")
+    # parser.add_argument('--backbone',  '-b', default="google/vit-base-patch16-224")
     parser.add_argument('--learning_rate',  '-lr', default=0.001)
     parser.add_argument('--weight_decay',  '-wd', default=0)
     parser.add_argument('--w_barrier',  '-wb', default=1)
     parser.add_argument('--w_latent',  '-wl', default=1)
+    parser.add_argument('--w_dyn',  '-wdy', default=1)
+    parser.add_argument('--w_recon',  '-wr', default=1)
     parser.add_argument('--w_safe', default=1)
     parser.add_argument('--w_unsafe', default=1)
-    parser.add_argument('--w_grad', default=1)
-    parser.add_argument('--w_non_zero', default=1)
-    parser.add_argument('--w_lambda', default=5)
+    parser.add_argument('--w_grad', default=0.000)
     parser.add_argument('--eps_safe', default=0.5)
     parser.add_argument('--eps_unsafe', default=0.5)
-    parser.add_argument('--eps_ascent', default=0.5)
-    parser.add_argument('--eps_descent', default=0.5)
+    parser.add_argument('--eps_ascent', default=0.03)
+    parser.add_argument('--eps_descent', default=0.03)
     parser.add_argument('--dt',  '-dt', default=0.1)
     parser.add_argument('--rtol',  '-rtol', default=5e-6)
     parser.add_argument('--window_size',  '-ws', default=2)
     parser.add_argument('--seed',  '-s', default=42)
-    parser.add_argument('--train_batch_size', default=32)
+    parser.add_argument('--train_batch_size', default=16)
     parser.add_argument('--val_batch_size', default=16)
     parser.add_argument('--num_workers', default=16)
     parser.add_argument('--train_barrier', default=True)
     parser.add_argument('--with_dynamic', default=True)
-    parser.add_argument('--with_gradient', default=False)
-    parser.add_argument('--max_epochs',  '-epoch', default=100)
-    parser.add_argument('--latent_dim', default=8)
+    parser.add_argument('--max_epochs',  '-epoch', default=15)
+    parser.add_argument('--latent_dim', default=16)
     parser.add_argument('--save_path',  '-sp', default="/root/tf-logs/")
-    parser.add_argument('--name', default="Barrier")
-    # parser.add_argument('--with_nonzero', default=False)
-    # parser.add_argument('--dynamic_path', default="/root/tf-logs/Dynamic/version_0/checkpoints/last.ckpt")
+    parser.add_argument('--name', default="SABLAS")
     parser.add_argument('--with_nonzero', default=True)
-    parser.add_argument('--dynamic_path', default="/root/tf-logs/BarrierClassifier/version_1/checkpoints/last.ckpt")
+    parser.add_argument('--dynamic_path', default="/root/tf-logs/Dynamic/version_1/checkpoints/last.ckpt")
     args = parser.parse_args()._get_kwargs()
     args = {k:v for (k,v) in args}
     args['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
     args['split_trajectory'] = True
     seed_everything(args['seed'])
-    if args['with_gradient'] and args['with_nonzero']:
-        args['name'] = "BarrierAll"
-    elif args['with_nonzero']:
-        args['name'] = "BarrierNonzero"
-    else:
-        args['name'] = "BarrierClassifier"
     main(args)
