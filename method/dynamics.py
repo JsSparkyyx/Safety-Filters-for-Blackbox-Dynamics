@@ -136,7 +136,10 @@ class InDCBFAttentionDynamics(torch.nn.Module):
         super(InDCBFAttentionDynamics, self).__init__()
         self.latent_dim = latent_dim
         self.device = device
-        self.encoder = ViTAttentionEncoder(latent_dim,model=model)
+        if "resnet" in model:
+            self.encoder = ResNetEncoder(latent_dim,model=model)
+        else:
+            self.encoder = ViTAttentionEncoder(latent_dim,model=model)
         self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
@@ -195,8 +198,10 @@ class SABLASDynamics(torch.nn.Module):
         self.latent_dim = latent_dim
         self.device = device
         self.dynamics = dynamics
-        # self.encoder = ViTAttentionEncoder(latent_dim,model=model)
-        self.encoder = ResNetEncoder(latent_dim,model=model)
+        if "resnet" in model:
+            self.encoder = ResNetEncoder(latent_dim,model=model)
+        else:
+            self.encoder = ViTAttentionEncoder(latent_dim,model=model)
         # self.ode = BlackBoxNODE([latent_dim+n_control,h_dim,h_dim,h_dim,latent_dim])
         self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
@@ -251,7 +256,6 @@ class HyperplaneEncoder(torch.nn.Module):
         self.device = device
         self.dynamics = dynamics
         if "resnet" in model:
-            print('resnet')
             self.encoder = ResNetEncoder(latent_dim,model=model)
         else:
             self.encoder = ViTAttentionEncoder(latent_dim,model=model)

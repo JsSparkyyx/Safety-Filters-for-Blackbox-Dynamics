@@ -33,7 +33,8 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # parser.add_argument('--backbone',  '-b', default="stabilityai/sd-vae-ft-mse")
-    parser.add_argument('--backbone',  '-b', default="openai/clip-vit-base-patch16")
+    # parser.add_argument('--backbone',  '-b', default="openai/clip-vit-base-patch16")
+    parser.add_argument('--backbone',  '-b', default="vc1")
     # parser.add_argument('--backbone',  '-b', default="google/vit-base-patch16-224")
     parser.add_argument('--learning_rate',  '-lr', default=0.001)
     parser.add_argument('--weight_decay',  '-wd', default=0)
