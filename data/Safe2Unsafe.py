@@ -90,9 +90,9 @@ class DeepAccidentDataset(LightningDataModule):
             split='val',
         )
 
-        # self.test_dataset = DeepAccident(
-        #     split='test',
-        # )
+        self.test_dataset = DeepAccident(
+            split='test',
+        )
         
     def train_dataloader(self) -> DataLoader:
         # weights = [20 if label[0] == 1 else 1 for i, u, label in self.train_dataset]

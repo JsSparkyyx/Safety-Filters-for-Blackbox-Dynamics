@@ -6,7 +6,7 @@ from torchdiffeq import odeint
 from tqdm import trange
 from torchvision.utils import save_image
 from method.utils import build_mlp, NeuralODE, BlackBoxNODE
-from method.backbones import VAE, ViTEncoder, ViTAttentionEncoder, ResNetEncoder
+from method.backbones import VAE, ViTEncoder, ViTAttentionEncoder, ResNetEncoder, ResNetEncoderUnfused
 import cvxpy as cp
 
 class InDCBFDynamicsWithRec(torch.nn.Module):
@@ -77,7 +77,10 @@ class InDCBFDynamics(torch.nn.Module):
         super(InDCBFDynamics, self).__init__()
         self.latent_dim = latent_dim
         self.device = device
-        self.vae = ViTEncoder(latent_dim,model=model)
+        if "resnet" in model:
+            self.encoder = ResNetEncoderUnfused(latent_dim,model=model)
+        else:
+            self.vae = ViTEncoder(latent_dim,model=model)
         self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
                              [latent_dim,h_dim,h_dim,latent_dim*n_control])
         self.n_control = n_control
@@ -131,6 +134,34 @@ class InDCBFDynamics(torch.nn.Module):
         loss_latent = F.mse_loss(x,x_tide)
         return {'loss_latent': loss_latent}
     
+class SABLASUnFusedDynamics(torch.nn.Module):
+    def __init__(self,n_control,device,model,dynamics=None,num_cam=6,latent_dim=256,h_dim=1024):
+        super(SABLASUnFusedDynamics, self).__init__()
+        self.latent_dim = latent_dim
+        self.device = device
+        self.dynamics = dynamics
+        self.encoder = ViTEncoder(latent_dim,model=model)
+        self.ode = NeuralODE([latent_dim,h_dim,h_dim,latent_dim],
+                             [latent_dim,h_dim,h_dim,latent_dim*n_control])
+        self.n_control = n_control
+        self.num_cam = num_cam
+
+    def simulate(self,i,u,dt=0.1,window_size=5,rtol=5e-6):
+        x_init = torch.zeros(i.shape[0],self.num_cam,self.latent_dim).to(self.device)
+        u = torch.cat([u[:,0,:].unsqueeze(1),u],dim=1)
+        x = self.encoder(i[:,0,:],x_init,u[:,0])
+        xs = [x]
+        x_tides = None
+        for k in trange(1,i.shape[1]):
+            x = self.encoder(i[:,k,:],x,u[:,k])
+            xs.append(x)
+        xs = torch.stack(xs,dim=1)
+        return (xs,x_tides)
+    
+    def loss_function(self,x,x_tide):
+        loss_latent = F.mse_loss(x,x_tide)
+        return {'loss_latent': loss_latent}
+
 class InDCBFAttentionDynamics(torch.nn.Module):
     def __init__(self,n_control,device,model,latent_dim=256,h_dim=1024):
         super(InDCBFAttentionDynamics, self).__init__()
@@ -273,5 +304,24 @@ class HyperplaneEncoder(torch.nn.Module):
         xs = torch.stack(xs,dim=1)
         return xs
     
-    
+class HyperplaneEncoderUnfused(torch.nn.Module):
+    def __init__(self,n_control,device,model,dynamics=None,num_cam=6,latent_dim=256,h_dim=1024):
+        super(HyperplaneEncoderUnfused, self).__init__()
+        self.latent_dim = latent_dim
+        self.device = device
+        self.dynamics = dynamics
+        self.encoder = ViTEncoder(latent_dim,model=model)
+        self.n_control = n_control
+        self.num_cam = num_cam
+
+    def simulate(self,i,u):
+        x_init = torch.zeros(i.shape[0],self.num_cam,self.latent_dim).to(self.device)
+        u = torch.cat([u[:,0,:].unsqueeze(1),u],dim=1)
+        x = self.encoder(i[:,0,:],x_init,u[:,0])
+        xs = [x]
+        for k in trange(1,i.shape[1]):
+            x = self.encoder(i[:,k,:],x,u[:,k])
+            xs.append(x)
+        xs = torch.stack(xs,dim=1)
+        return xs
     

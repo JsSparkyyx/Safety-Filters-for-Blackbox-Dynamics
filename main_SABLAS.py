@@ -1,6 +1,6 @@
-from method.dynamics import SABLASDynamics, InDCBFAttentionDynamics
-from method.barriers import SABLASBarrier, InDCBFAttentionBarrier
-from method.trainers import SABLASTrainer, InDCBFTrainer
+from method.dynamics import SABLASDynamics, SABLASUnFusedDynamics
+from method.barriers import SABLASBarrier, SABLASBarrierUnfused
+from method.trainers import SABLASTrainer
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -23,9 +23,14 @@ def main(args):
 
     # dynamics = trainer.model.ode
     # encoder = trainer.model.encoder
-    barrier = SABLASBarrier(2,**args)
-    model = SABLASDynamics(2,args['device'],model=args['backbone'],latent_dim=args['latent_dim'])
-    trainer = SABLASTrainer(model,barrier,**args)
+    if args['fused_rep']:
+        barrier = SABLASBarrier(2,**args)
+        model = SABLASDynamics(2,args['device'],model=args['backbone'],latent_dim=args['latent_dim'])
+        trainer = SABLASTrainer(model,barrier,**args)
+    else:
+        barrier = SABLASBarrierUnfused(2,**args)
+        model = SABLASUnFusedDynamics(2,args['device'],model=args['backbone'],latent_dim=args['latent_dim'])
+        trainer = SABLASTrainer(model,barrier,**args)
     # trainer.model.encoder = encoder
     # for p in trainer.model.encoder.parameters():
     #     p.requires_grad = False
@@ -33,7 +38,7 @@ def main(args):
     #     p.requires_grad = False
     runner = Trainer(logger=tb_logger,
                  callbacks=[
-                     ModelCheckpoint(save_top_k=2, 
+                     ModelCheckpoint(save_top_k=0, 
                                      dirpath =os.path.join(tb_logger.log_dir , "checkpoints"), 
                                      monitor= "loss",
                                      save_last= True),
@@ -60,28 +65,33 @@ if __name__ == '__main__':
     parser.add_argument('--w_safe', default=1)
     parser.add_argument('--w_unsafe', default=1)
     parser.add_argument('--w_grad', default=0.000)
-    parser.add_argument('--eps_safe', default=0.5)
-    parser.add_argument('--eps_unsafe', default=0.5)
-    parser.add_argument('--eps_ascent', default=0.03)
-    parser.add_argument('--eps_descent', default=0.03)
+    parser.add_argument('--eps_safe', type=float, default=0.5)
+    parser.add_argument('--eps_unsafe', type=float, default=0.5)
+    parser.add_argument('--eps_ascent', type=float, default=0.01)
+    parser.add_argument('--eps_descent', type=float, default=0.01)
     parser.add_argument('--dt',  '-dt', default=0.1)
     parser.add_argument('--rtol',  '-rtol', default=5e-6)
     parser.add_argument('--window_size',  '-ws', default=2)
     parser.add_argument('--seed',  '-s', default=42)
-    parser.add_argument('--train_batch_size', default=16)
-    parser.add_argument('--val_batch_size', default=16)
+    parser.add_argument('--train_batch_size', default=48)
+    parser.add_argument('--val_batch_size', default=24)
     parser.add_argument('--num_workers', default=16)
     parser.add_argument('--train_barrier', default=True)
     parser.add_argument('--with_dynamic', default=True)
     parser.add_argument('--max_epochs',  '-epoch', default=15)
     parser.add_argument('--latent_dim', default=16)
     parser.add_argument('--save_path',  '-sp', default="/root/tf-logs/")
-    parser.add_argument('--name', default="SABLAS")
+    parser.add_argument('--name', default="SABLASUnfused")
     parser.add_argument('--with_nonzero', default=True)
+    parser.add_argument('--fused_rep', default=True)
     parser.add_argument('--dynamic_path', default="/root/tf-logs/Dynamic/version_1/checkpoints/last.ckpt")
     args = parser.parse_args()._get_kwargs()
     args = {k:v for (k,v) in args}
     args['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
     args['split_trajectory'] = True
+    if args['fused_rep']:
+        args['name'] = 'SABLAS'
+    m2n = {"google/vit-base-patch16-224":"vit","openai/clip-vit-base-patch16":"clip","vc1":"vc1","resnet50":"resnet"}
+    args['name'] += f"_{m2n[args['backbone']]}_{args['seed']}"
     seed_everything(args['seed'])
     main(args)
