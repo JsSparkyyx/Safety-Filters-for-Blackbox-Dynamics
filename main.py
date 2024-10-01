@@ -23,7 +23,7 @@ def main(args):
     trainer = InDCBFTrainer(model,barrier,**args)
     runner = Trainer(logger=tb_logger,
                  callbacks=[
-                     ModelCheckpoint(save_top_k=2, 
+                     ModelCheckpoint(save_top_k=0, 
                                      dirpath =os.path.join(tb_logger.log_dir , "checkpoints"), 
                                      monitor= "loss",
                                      save_last= True),
@@ -67,7 +67,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_path',  '-sp', default="/root/autodl-tmp/logs/")
     parser.add_argument('--name', default="InDCBFUnfused")
     parser.add_argument('--with_nonzero', default=True)
-    parser.add_argument('--fused_rep', default=True)
+    parser.add_argument('--fused_rep', action="store_false")
     parser.add_argument('--dynamic_path', default="/root/tf-logs/Dynamic/version_1/checkpoints/last.ckpt")
     args = parser.parse_args()._get_kwargs()
     args = {k:v for (k,v) in args}

@@ -280,6 +280,7 @@ class SABLASTrainer(pl.LightningModule):
         return self.model(i,u,x)
     
     def training_step(self, batch, batch_idx):
+        torch.set_grad_enabled(True)
         i, u, label = batch
         self.curr_device = i.device
 
@@ -295,7 +296,7 @@ class SABLASTrainer(pl.LightningModule):
             train_loss['loss_unsafe'] = output['loss_unsafe']
             train_loss['loss_grad_ascent'] = output['loss_grad_ascent']
             train_loss['loss'] += output['loss_safe']*self.w_barrier+output['loss_unsafe']*self.w_barrier
-            train_loss['loss'] += output['loss_grad_ascent']*self.w_barrier
+            # train_loss['loss'] += output['loss_grad_ascent']*self.w_barrier
             self.log_dict({'b_safe':output['b_safe'],'b_unsafe':output['b_unsafe']},sync_dist=True)
             self.log_dict({'b_grad_ascent':output['b_grad_ascent']},sync_dist=True)
             if batch_idx % 5 == 0:

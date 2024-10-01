@@ -393,7 +393,7 @@ class DiscriminatingHyperplane(torch.nn.Module):
         a_safe, b_safe = self.forward(x_safe)
         a_unsafe, b_unsafe = self.forward(x_unsafe)
         value_safe = torch.einsum("btc,btc->bt",a_safe,u[label == 0]) + b_safe
-        value_unsafe = torch.einsum("btc,btc->bt",a_unsafe,u[label == 1]) + b_unsafe
+        value_unsafe = torch.einsum("btc,btc->bt",a_unsafe,u[(label == 1) + (label==2)]) + b_unsafe
         loss_pos = self.gamma_pos*F.relu(value_safe).mean()
         loss_neg = self.gamma_neg*F.relu(-value_unsafe).mean()
         output = {'loss_pos':loss_pos,'loss_neg':loss_neg}

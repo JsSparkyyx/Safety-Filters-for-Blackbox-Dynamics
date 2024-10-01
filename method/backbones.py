@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional
 from method.utils import build_mlp
 
 class VAE(torch.nn.Module):
@@ -185,3 +186,23 @@ class ResNetEncoderUnfused(torch.nn.Module):
         rep = self.mlp(rep)
         final_rep = torch.cat([rep,x_p,u_p.unsqueeze(1).expand(-1,N,-1)],dim=-1)
         return self.linear(final_rep)
+
+class QuantityPermutationInvariantEncoder(torch.nn.Module):
+    def __init__(self,latent_dim,n_control=2,feature_dim=4):
+        super(QuantityPermutationInvariantEncoder, self).__init__()
+        self.latent_dim = latent_dim
+        self.n_control = n_control
+        self.feature_dim = feature_dim
+        # self.linear = torch.nn.Linear(400,32)
+        self.linear = torch.nn.Linear(latent_dim,latent_dim)
+        self.mlp = build_mlp([feature_dim,128,latent_dim])
+        self.activation = torch.nn.ReLU()
+
+    def forward(self,state):
+        state = self.mlp(state)
+        # state = self.mlp(torch.nn.functional.tanh(state))
+        # state = self.linear(state.view(state.shape[0],-1))
+        state = self.activation(state)
+        state = torch.max(state,dim=1).values
+        # state = self.linear(state)
+        return state
