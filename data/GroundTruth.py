@@ -9,7 +9,7 @@ from PIL import Image
 import pandas as pd
 from torch.utils.data.sampler import WeightedRandomSampler
 
-DATA_PATH = "/root/autodl-tmp/data/DeepAccident_data"
+DATA_PATH = "/storage1/sibai/Active/yuxuan/deepaccident"
 CAMERA_LOC = ["Camera_Back","Camera_BackLeft","Camera_BackRight","Camera_Front","Camera_FrontLeft","Camera_FrontRight"]
 
 class DeepAccident(Dataset):

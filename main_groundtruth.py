@@ -69,7 +69,7 @@ if __name__ == '__main__':
     parser.add_argument('--with_dynamic', default=True)
     parser.add_argument('--max_epochs',  '-epoch', default=100)
     parser.add_argument('--latent_dim', default=16)
-    parser.add_argument('--save_path',  '-sp', default="/root/tf-logs/")
+    parser.add_argument('--save_path',  '-sp', default="/storage1/sibai/Active/yuxuan/tf-logs")
     parser.add_argument('--name', default="GroundTruth")
     args = parser.parse_args()._get_kwargs()
     args = {k:v for (k,v) in args}
